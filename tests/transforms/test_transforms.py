@@ -652,6 +652,24 @@ def test_CochannelInterference(signal: Signal, params: dict, expected: bool, is_
         assert (signal.data.dtype == TorchSigComplexDataType) == expected
 
 
+def test_CochannelInterference_precise_updates_snr() -> None:
+    signal = new_test_signal()
+    signal["snr_db"] = 20.0
+    original_snr = signal.snr_db
+
+    T = CochannelInterference(
+        power_range=(0.5, 0.5),
+        filter_weights=low_pass(0.125, 0.125, 1.0),
+        color="white",
+        continuous=True,
+        precise=True,
+        seed=42,
+    )
+    signal = T(signal)
+
+    assert signal.snr_db < original_snr
+
+
 @pytest.mark.parametrize(
     "signal, is_error",
     [
@@ -775,6 +793,16 @@ def test_DigitalAGC(signal: Signal, params: dict, is_error: bool) -> None:
         assert type(signal.data) == type(signal_test.data)
         assert signal.data.dtype == TorchSigComplexDataType
         assert np.not_equal(signal.data, signal_test.data).any()
+
+
+def test_DigitalAGC_uses_alpha_overflow_distribution() -> None:
+    T = DigitalAGC(
+        alpha_track=(1e-6, 1e-5),
+        alpha_overflow=(1e-1, 1e-1),
+        seed=42,
+    )
+
+    assert T.alpha_overflow_distribution() == pytest.approx(1e-1)
 
 
 @pytest.mark.parametrize(
@@ -1544,3 +1572,19 @@ def test_TimeVaryingNoise(signal: Signal, params: dict, is_error: bool) -> None:
         assert type(signal.data) == type(signal_test.data)
         assert signal.data.dtype == signal_test.data.dtype
         assert np.not_equal(signal.data, signal_test.data).any()
+
+
+def test_TimeVaryingNoise_respects_random_regions_flag() -> None:
+    signal = new_test_signal()
+    T = TimeVaryingNoise(
+        noise_power_low=(-60.0, -60.0),
+        noise_power_high=(-20.0, -20.0),
+        inflections=[2],
+        random_regions=False,
+        seed=42,
+    )
+
+    assert T.random_regions_distribution() == 0.0
+    out = T(signal.copy())
+    assert out.data.dtype == signal.data.dtype
+    assert np.not_equal(out.data, signal.data).any()

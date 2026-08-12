@@ -792,6 +792,31 @@ def test_iq_imbalance(data: Any, params: dict, expected: bool, is_error: bool) -
         assert (data.dtype == TorchSigComplexDataType) == expected
 
 
+def test_iq_imbalance_creates_true_branch_mismatch() -> None:
+    data = np.ones(2048, dtype=TorchSigComplexDataType) * (1 + 1j)
+
+    balanced = iq_imbalance(
+        data.copy(),
+        amplitude_imbalance=0.0,
+        phase_imbalance=0.0,
+        dc_offset_db=-200,
+        dc_offset_phase_rads=0.0,
+    )
+    imbalanced = iq_imbalance(
+        data.copy(),
+        amplitude_imbalance=6.0,
+        phase_imbalance=0.0,
+        dc_offset_db=-200,
+        dc_offset_phase_rads=0.0,
+    )
+
+    balanced_ratio = np.mean(np.abs(np.real(balanced))) / np.mean(np.abs(np.imag(balanced)))
+    imbalanced_ratio = np.mean(np.abs(np.real(imbalanced))) / np.mean(np.abs(np.imag(imbalanced)))
+
+    assert balanced_ratio == pytest.approx(1.0, rel=1e-3)
+    assert imbalanced_ratio == pytest.approx(10 ** (6.0 / 20.0), rel=5e-2)
+
+
 @pytest.mark.parametrize(
     "data, params, expected, is_error",
     [

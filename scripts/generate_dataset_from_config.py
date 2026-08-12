@@ -103,7 +103,7 @@ def generate_dataset() -> None:
     if cfg.output_representation == "spectrogram": # typical wideband
         transforms.append(Spectrogram(fft_size=int(dataset_metadata["fft_size"])))
         transforms.append(YOLOLabel())
-        target_labels=["yolo_label"],  # yolo labels
+        target_labels = ["yolo_label"]  # yolo labels
     elif cfg.output_representation == "iq": # typical narrowband
         transforms.append(ComplexTo2D())
 

@@ -3,6 +3,7 @@
 import numpy as np
 import yaml
 import pytest
+import h5py
 
 from torchsig.utils.writer import DatasetCreator
 from torchsig.utils.data_loading import WorkerSeedingDataLoader
@@ -104,6 +105,51 @@ def test_DatasetCreator_overwrite_false_errors_if_incomplete(tmp_path):
     dc = DatasetCreator(dataloader=dl, dataset_length=6, root=tmp_path, overwrite=False, multithreading=False)
     with pytest.raises(RuntimeError, match=r"partially exists"):
         dc.create()
+
+
+def test_DatasetCreator_overwrite_false_uses_persisted_metadata_diff(tmp_path, capsys):
+    seed = 42
+    ds = default_dataset(num_signals_max=1, num_signals_min=1)
+    dl = WorkerSeedingDataLoader(ds, seed=seed, batch_size=2)
+
+    DatasetCreator(dataloader=dl, dataset_length=6, root=tmp_path, overwrite=True, multithreading=False).create()
+
+    dataset_info_path = tmp_path / "dataset_info.yaml"
+    dataset_info = yaml.safe_load(dataset_info_path.read_text()) or {}
+    dataset_info["seed"] = 999
+    dataset_info_path.write_text(yaml.safe_dump(dataset_info))
+
+    DatasetCreator(dataloader=dl, dataset_length=6, root=tmp_path, overwrite=False, multithreading=False).create()
+
+    captured = capsys.readouterr()
+    assert "differs from current dataset config" in captured.out
+    assert "seed:" in captured.out
+
+
+def test_DatasetCreator_passes_file_handler_kwargs(tmp_path):
+    ds = default_dataset(num_signals_max=1, num_signals_min=1)
+    dl = WorkerSeedingDataLoader(ds, seed=42, batch_size=2)
+
+    DatasetCreator(
+        dataloader=dl,
+        dataset_length=4,
+        root=tmp_path,
+        overwrite=True,
+        multithreading=False,
+        compression="gzip",
+        compression_opts=1,
+        shuffle=False,
+        fletcher32=False,
+    ).create()
+
+    with h5py.File(tmp_path / "data.h5", "r") as h5f:
+        first_key = next(iter(h5f["index"].keys()))
+        sample_id = h5f["index"][first_key][()].decode()
+        dataset = h5f["data"][sample_id]
+        assert dataset.compression == "gzip"
+        assert dataset.compression_opts == 1
+        assert dataset.shuffle is False
+        assert dataset.fletcher32 is False
 
 
 @pytest.mark.parametrize(

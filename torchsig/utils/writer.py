@@ -180,7 +180,7 @@ class DatasetCreator:
         """Instantiate writer without entering context to not enter setup, resetting folder."""
         maybe_data_file = None
         try:
-            writer = self.file_handler(root=self.root)
+            writer = self.file_handler(root=self.root, **self.kwargs)
             maybe_data_file = getattr(writer, "datapath", None)
             if isinstance(maybe_data_file, (str, Path)):
                 maybe_data_file = Path(maybe_data_file)
@@ -237,7 +237,14 @@ class DatasetCreator:
         }
 
     def check_yamls(self, *, expected_dataset_info: dict[str, Any]) -> tuple[bool, list[tuple[str, Any, Any]]]:
-        """Returns (complete, differences) without mutating dataset or entering writer context."""
+        """Returns (complete, differences) without mutating dataset or entering writer context.
+
+        NOTE: This only compares the stable metadata persisted in `dataset_info.yaml`.
+        Older TorchSig code referenced a richer `check_yamls()` flow without fully
+        persisting the comparison inputs; if deeper parameter diffing is needed,
+        extend the on-disk metadata first and keep this helper as the single
+        comparison point.
+        """
         differences: list[tuple[str, Any, Any]] = []
 
         if not self.writer_info_filepath.exists():
@@ -328,7 +335,7 @@ class DatasetCreator:
             self.items_written = 0
             self._msg_timer = time()
 
-            with self.file_handler(root=self.root) as writer:
+            with self.file_handler(root=self.root, **self.kwargs) as writer:
                 # Write initial YAMLs
                 write_dict_to_yaml(self.dataset_info_filepath, self.get_dataset_info_dict(
                     dataset_length=0, original_target_labels=orig_target_labels,

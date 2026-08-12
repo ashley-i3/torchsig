@@ -111,6 +111,6 @@ def default_dataloader(
     dataloader = WorkerSeedingDataLoader(
         dataset, collate_fn=collate_fn, batch_size=batch_size, num_workers=num_workers
     )
-    if seed:
+    if seed is not False:
         dataloader.seed(seed)
     return dataloader

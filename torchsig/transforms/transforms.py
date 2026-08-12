@@ -681,6 +681,7 @@ class CochannelInterference(SignalTransform):
         filter_weights: np.ndarray | None = None,
         color: str = "white",
         continuous: bool = True,
+        precise: bool = False,
         **kwargs,
     ):
         """Initialize the CochannelInterference transform.
@@ -690,6 +691,7 @@ class CochannelInterference(SignalTransform):
             filter_weights: Predefined baseband lowpass filter, fixed for all calls. Default low_pass(0.125, 0.125, 1.0).
             color: Base noise color, supports 'white', 'pink', or 'red' noise frequency spectrum types. Default 'white'.
             continuous: Sets noise to continuous (True) or impulsive (False). Default True.
+            precise: Measure and update SNR metadata. Defaults to False.
             **kwargs: Additional keyword arguments passed to the parent class.
         """
         super().__init__(data_dtype=TorchSigComplexDataType, **kwargs)
@@ -698,6 +700,7 @@ class CochannelInterference(SignalTransform):
         self.filter_weights = low_pass(0.125, 0.125, 1.0) if filter_weights is None else filter_weights
         self.color = color
         self.continuous = continuous
+        self.precise = precise
 
     def __apply__(self, signal: Signal) -> Signal:
         """Apply cochannel interference to the signal.
@@ -715,7 +718,7 @@ class CochannelInterference(SignalTransform):
             total_power = np.sum(np.abs(signal.data) ** 2) / len(signal.data)
             sig_power = total_power / (1 + 1 / snr_linear)
             noise_power = sig_power / snr_linear
-            new_snr = sig_power / (noise_power + self.noise_power_linear)
+            new_snr = sig_power / (noise_power + cochan_noise_power)
             signal["snr_db"] = 10 * np.log10(new_snr)
 
         signal.data = F.cochannel_interference(
@@ -924,7 +927,7 @@ class DigitalAGC(SignalTransform):
         )
         self.alpha_track_distribution = self.get_distribution(self.alpha_track, "log10")
         self.alpha_overflow_distribution = self.get_distribution(
-            self.alpha_track, "log10"
+            self.alpha_overflow, "log10"
         )
         self.alpha_acquire_distribution = self.get_distribution(
             self.alpha_acquire, "log10"
@@ -2049,7 +2052,7 @@ class TimeVaryingNoise(SignalTransform):
         noise_power_low = self.noise_power_low_distribution()
         noise_power_high = self.noise_power_high_distribution()
         inflections = self.inflections_distribution()
-        random_regions = self.random_regions_distribution
+        random_regions = self.random_regions_distribution()
 
         signal.data = F.time_varying_noise(
             signal.data,

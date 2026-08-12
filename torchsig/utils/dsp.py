@@ -393,7 +393,7 @@ def design_half_band_filter(
     )
 
     # find the index corresponding to the middle weight
-    middle_weight_index = int(len(weights - 1) / 2)
+    middle_weight_index = int((len(weights) - 1) / 2)
     # compute the indices of zero weights to the left and right of the middle weight
     left_indices = np.arange(middle_weight_index - 2, 0, -2)
     right_indices = np.arange(middle_weight_index + 2, filter_length, 2)

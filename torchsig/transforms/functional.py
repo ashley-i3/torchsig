@@ -748,10 +748,12 @@ def iq_imbalance(
     Returns:
         IQ data with IQ Imbalance applied.
     """
-    # amplitude imbalance
-    data = 10 ** (amplitude_imbalance / 10.0) * np.real(data) + 1j * 10 ** (
-        amplitude_imbalance / 10.0
-    ) * np.imag(data)
+    # Split the requested gain mismatch evenly across I and Q while preserving
+    # the requested branch-to-branch amplitude difference in dB.
+    amplitude_scale = 10 ** (amplitude_imbalance / 40.0)
+    i_data = amplitude_scale * np.real(data)
+    q_data = np.imag(data) / amplitude_scale
+    data = i_data + 1j * q_data
 
     # phase imbalance
     data = np.exp(-1j * phase_imbalance / 2.0) * np.real(data) + np.exp(

@@ -52,3 +52,15 @@ def test_parent_seedable():
     assert val_0 == new_val_0
     assert val_1 == new_val_1
     assert val_2 == new_val_2
+
+
+def test_seed_zero_is_respected():
+    s0 = Seedable(seed=0)
+    s1 = Seedable(seed=0)
+
+    vals0 = [s0.random_generator.random() for _ in range(3)]
+    vals1 = [s1.random_generator.random() for _ in range(3)]
+
+    assert s0.rng_seed == 0
+    assert s1.rng_seed == 0
+    assert vals0 == vals1
