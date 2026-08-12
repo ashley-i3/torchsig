@@ -1,6 +1,8 @@
 # Common Python Files
 __pycache__/
 _build/
+/build/
+/rust_functions/
 dist/
 *.pytest_cache
 *.env
