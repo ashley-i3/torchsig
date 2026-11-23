@@ -754,6 +754,8 @@ def polyphase_decimator(input_signal: np.ndarray, decimation_rate: int) -> np.nd
 def partition_polyphase(h: np.ndarray, up_rate: int, taps_per_phase: int) -> np.ndarray:
     """Partitions filter coefficients into a polyphase filter bank.
 
+    ``h_pfb[phase, k] = h[phase + k * up_rate] * up_rate`` (zero past the end of ``h``).
+
     Args:
         h: Filter coefficients (1D array of floats)
         up_rate: Upsampling factor (integer)
@@ -762,18 +764,28 @@ def partition_polyphase(h: np.ndarray, up_rate: int, taps_per_phase: int) -> np.
     Returns:
         2D array representing the polyphase filter bank
     """
-    h_pfb = np.zeros((up_rate, taps_per_phase), dtype=TorchSigRealDataType)
+    padded = np.zeros(up_rate * taps_per_phase, dtype=TorchSigRealDataType)
+    n = min(len(h), len(padded))
+    padded[:n] = h[:n]
+    # Same arithmetic as the former element-wise loop: float32 coefficient times the integer rate.
+    return padded.reshape(taps_per_phase, up_rate).T * up_rate
 
-    for phase in range(up_rate):
-        tap_idx = phase
-        for idx in range(taps_per_phase):
-            if tap_idx < len(h):
-                h_pfb[phase, idx] = h[tap_idx] * up_rate
-            else:
-                h_pfb[phase, idx] = 0.0
-            tap_idx += up_rate
 
-    return h_pfb
+def _polyphase_bank(h: np.ndarray, up_rate: int, taps_per_phase: int) -> np.ndarray:
+    """Cached ``partition_polyphase``: clock impairments call it with the same filter every time."""
+    key = (h.dtype.str, h.shape, hash(h.tobytes()), up_rate, taps_per_phase)
+    bank = _POLYPHASE_CACHE.get(key)
+    if bank is None:
+        bank = partition_polyphase(h, up_rate, taps_per_phase)
+        bank.setflags(write=False)
+        if len(_POLYPHASE_CACHE) >= 8:
+            _POLYPHASE_CACHE.clear()
+        _POLYPHASE_CACHE[key] = bank
+    return bank
+
+
+_POLYPHASE_CACHE: dict = {}
+
 
 def sampling_clock_impairments(
     h: np.ndarray,
@@ -790,6 +802,14 @@ def sampling_clock_impairments(
     in the sampling rate during resampling. It uses a polyphase filter bank approach for
     efficient implementation.
 
+    Vectorized: the commutator recurrence (which input sample and filter phase each output
+    uses) runs in plain Python with the same floating-point operations as the original
+    per-sample loop, the random draws are taken in bulk and the generator is then left in
+    exactly the state the original loop left it in, and the multiply-accumulate for all
+    outputs is one array operation. Results match the original loop: identical filter
+    phases, input positions and random-number stream; output values identical up to
+    floating-point summation order.
+
     Args:
         h: Filter coefficients (1D array of floats)
         x: Input signal (1D array of complex numbers)
@@ -797,7 +817,7 @@ def sampling_clock_impairments(
         drate: Downsampling factor (float)
         jitter_ppm: Jitter in parts per million (float)
         drift_ppm: Drift in parts per million (float)
-        seed: Random seed (optional)
+        rng: Random number generator (required when jitter_ppm or drift_ppm is non-zero)
 
     Returns:
         Output signal with clock impairments (1D array of complex numbers)
@@ -805,8 +825,8 @@ def sampling_clock_impairments(
     # Compute taps per phase for polyphase filter bank
     taps_per_phase = int(np.ceil(len(h) / uprate))
 
-    # Design and partition the polyphase filter bank
-    h_pfb = partition_polyphase(h, uprate, taps_per_phase)
+    # Design and partition the polyphase filter bank (cached: identical on every call)
+    h_pfb = _polyphase_bank(h, uprate, taps_per_phase)
 
     # Zero-pad the input samples
     padded_len = len(x) + 2 * taps_per_phase - 1
@@ -815,55 +835,58 @@ def sampling_clock_impairments(
     end = start + len(x)
     input_padded[start:end] = x
 
-    # Initialize variables
-    q_step = uprate / drate
     num_output_samples = int(np.ceil(len(input_padded) * uprate / drate)) + 1
-    output_samples = np.zeros(num_output_samples, dtype=TorchSigComplexDataType)
-    input_idx = 0
-    output_idx = 0
-    clock_drift = 0.0
     idx_stop = len(input_padded) - taps_per_phase
-
-    # Generate random jitter and drift
     jitter_std = jitter_ppm * 1e-6
     drift_std = drift_ppm * 1e-6
+    random_steps = jitter_ppm != 0.0 or drift_ppm != 0.0
 
-    # Run the resampler
+    # Draws in the original order (jitter, drift, jitter, drift, ...): one pair per output.
+    # Take an upper bound in bulk, then rewind and consume exactly as many as were used.
+    if random_steps:
+        saved_state = rng.bit_generator.state
+        normals = rng.standard_normal(2 * num_output_samples).tolist()
+
+    # Commutator recurrence: identical float operations to the original loop.
+    starts: list = []
+    phases: list = []
+    q_step = uprate / drate
+    input_idx = 0
+    clock_drift = 0.0
+    k = 0
     while input_idx < idx_stop:
-        # Update commutator position
         while q_step >= uprate:
             q_step -= uprate
             input_idx += 1
-
-        delay_slice = input_padded[input_idx:input_idx + taps_per_phase]
-
         if q_step >= uprate:
             break
-
-        # Get filter weights from PFB
-        phase = int(q_step)
-        h_phase = h_pfb[phase][:taps_per_phase]
-
-        # Multiply and accumulate
-        acc_re = np.sum(h_phase * delay_slice[::-1].real)
-        acc_im = np.sum(h_phase * delay_slice[::-1].imag)
-        pfb_out = acc_re + 1j * acc_im
-
-        # Store output sample
-        output_samples[output_idx] = pfb_out
-        output_idx += 1
-
-        # Update commutator with jitter and drift
-        if jitter_ppm != 0.0 or drift_ppm != 0.0:
-            clock_jitter = rng.normal(0.0, jitter_std)
-            clock_drift += rng.normal(0.0, drift_std)
+        starts.append(input_idx)
+        phases.append(int(q_step))
+        if random_steps:
+            clock_jitter = jitter_std * normals[2 * k]
+            clock_drift += drift_std * normals[2 * k + 1]
             q_step += drate + clock_jitter + clock_drift
         else:
             q_step += drate
+        k += 1
 
-    # Return properly sized output
-    return output_samples[:output_idx-1] if output_idx > 0 else np.array([], dtype=TorchSigComplexDataType)
+    if random_steps:
+        rng.bit_generator.state = saved_state
+        rng.standard_normal(2 * k)  # leave the generator where the per-sample loop left it
 
+    if k == 0:
+        return np.array([], dtype=TorchSigComplexDataType)
+
+    # Multiply-accumulate for every output at once: out[j] = sum_t h_pfb[phase_j, t] * x_pad[start_j + T-1-t]
+    window_index = np.asarray(starts)[:, None] + np.arange(taps_per_phase - 1, -1, -1)[None, :]
+    windows = input_padded[window_index]
+    weights = h_pfb[np.asarray(phases)]
+    acc_re = np.ascontiguousarray(weights * windows.real).sum(axis=1)
+    acc_im = np.ascontiguousarray(weights * windows.imag).sum(axis=1)
+    output_samples = (acc_re + 1j * acc_im).astype(TorchSigComplexDataType)
+
+    # Same length convention as the original loop (drops the last output sample)
+    return output_samples[: k - 1]
 
 
 def upsample(signal: np.ndarray, rate: int) -> np.ndarray:
