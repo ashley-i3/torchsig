@@ -1037,6 +1037,37 @@ def normalize(
     return np.multiply(data, 1.0 / norm).astype(TorchSigComplexDataType)
 
 
+def _ripple_db(weights: np.ndarray) -> float:
+    """Peak-to-trough passband ripple (dB) of FIR ``weights`` over a 1024-point FFT."""
+    fft_db = 20 * np.log10(np.abs(np.fft.fftshift(np.fft.fft(weights, 1024))))
+    return float(np.max(fft_db) - np.min(fft_db))
+
+
+def _shrink_to_ripple_spec(weights: np.ndarray, max_ripple_db: float, iterations: int = 40) -> np.ndarray:
+    """Scale all taps except the dominant one by the largest factor in [0, 1] that meets the spec.
+
+    At factor 0 the filter is a single tap with 0 dB ripple, so a valid filter always exists.
+    Bisection keeps the largest feasible factor found (deterministic; no random draws).
+    """
+    main = int(np.argmax(np.abs(weights)))
+    tail = np.ones(len(weights), dtype=bool)
+    tail[main] = False
+
+    def scaled(s: float) -> np.ndarray:
+        w = weights.copy()
+        w[tail] *= s
+        return w
+
+    lo, hi = 0.0, 1.0  # lo always feasible, hi infeasible
+    for _ in range(iterations):
+        mid = 0.5 * (lo + hi)
+        if _ripple_db(scaled(mid)) <= max_ripple_db:
+            lo = mid
+        else:
+            hi = mid
+    return scaled(lo)
+
+
 def passband_ripple(
     data: np.ndarray,
     num_taps: int = 2,
@@ -1056,8 +1087,11 @@ def passband_ripple(
         coefficient_decay_rate: The decay rate of the exponential weighting in the filter. Defaults to 1.0.
         rng: Random number generator. Defaults to np.random.default_rng(seed=None).
 
-    Raises:
-        ValueError: When filter cannot meet ripple spec within a set number of iterations.
+    If no random candidate meets the ripple spec within the attempt limit (rare, mostly with
+    3 taps, slow decay and ~1 dB ripple), the last candidate's non-dominant taps are shrunk
+    until the spec is met (see ``_shrink_to_ripple_spec``). That fallback draws no random
+    numbers, so every call that succeeded before returns the same filter and leaves the RNG
+    in the same state.
 
     Returns:
         Filtered data with passband ripple applied.
@@ -1069,7 +1103,7 @@ def passband_ripple(
     # initialize estimate such that it always enters loop
     estimate_ripple_db = max_ripple_db + 1
 
-    while estimate_ripple_db > max_ripple_db and counter < 1000:
+    while estimate_ripple_db > max_ripple_db and counter < max_counter:
         # designs the weights: complex gaussian with exponential decay
         gaussian = rng.normal(0, 1, num_taps) + 1j * rng.normal(0, 1, num_taps)
         decay = np.exp(-coefficient_decay_rate * np.arange(0, num_taps))
@@ -1077,13 +1111,13 @@ def passband_ripple(
         # scale weights to have average 0 dB level
         weights /= np.max(np.abs(weights))
         # determine if passband ripple meets spec
-        fft_db = 20 * np.log10(np.abs(np.fft.fftshift(np.fft.fft(weights, 1024))))
-        estimate_ripple_db = np.max(fft_db) - np.min(fft_db)
+        estimate_ripple_db = _ripple_db(weights)
         # increment counter
         counter += 1
 
-    if counter >= max_counter:
-        raise ValueError("Passband ripple was unable to meet ripple specs.")
+    if estimate_ripple_db > max_ripple_db:
+        # Previously raised ValueError("Passband ripple was unable to meet ripple specs.").
+        weights = _shrink_to_ripple_spec(weights, max_ripple_db)
 
     # apply filter
     data = dsp.convolve(data, weights)

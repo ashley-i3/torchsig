@@ -993,6 +993,40 @@ def test_normalize(data: Any, params: dict, expected: np.ndarray | ValueError, i
         assert data.dtype == TorchSigComplexDataType
 
 
+def test_passband_ripple_never_raises_and_meets_spec(monkeypatch) -> None:
+    """Hard parameters used to exhaust the 1000 rejection attempts and raise ValueError
+    (seen in ~0.03% of impaired samples). The fallback must return a filter that meets the spec."""
+    import torchsig.transforms.functional as F
+
+    captured = {}
+    real_convolve = F.dsp.convolve
+
+    def capture(data, taps):
+        captured["weights"] = np.array(taps)
+        return real_convolve(data, taps)
+
+    monkeypatch.setattr(F.dsp, "convolve", capture)
+    data = np.ones(64, dtype=TorchSigComplexDataType)
+    # Seeds 3000-3299 of this parameter set include cases that previously raised.
+    for seed in range(3000, 3300):
+        out = passband_ripple(data, num_taps=3, max_ripple_db=1.0, coefficient_decay_rate=1.0,
+                              rng=np.random.default_rng(seed))
+        assert np.isfinite(out).all() and out.dtype == TorchSigComplexDataType
+        assert F._ripple_db(captured["weights"]) <= 1.0 + 1e-9
+
+
+def test_shrink_to_ripple_spec_keeps_dominant_tap() -> None:
+    from torchsig.transforms.functional import _ripple_db, _shrink_to_ripple_spec
+
+    weights = np.array([0.4 + 0.1j, 1.0 + 0j, -0.6j])
+    assert _ripple_db(weights) > 1.0
+    shrunk = _shrink_to_ripple_spec(weights, 1.0)
+    assert _ripple_db(shrunk) <= 1.0
+    assert shrunk[1] == weights[1]  # dominant tap untouched
+    ratio = shrunk[[0, 2]] / weights[[0, 2]]
+    assert np.allclose(ratio, ratio[0]) and 0 < ratio[0].real < 1  # tail scaled uniformly
+
+
 @pytest.mark.parametrize(
     "params, expected, is_error",
     [
